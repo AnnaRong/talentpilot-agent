@@ -1,0 +1,4 @@
+interface:
+  display_name: "招聘协作助手"
+  short_description: "连接iTalent、筛选简历、审计流程并联动文献MCP"
+  default_prompt: "使用 $italent-recruitment-collaborator 执行北森招聘审计、人才库筛选或简历分批推荐。"

@@ -1,0 +1,24 @@
+.env
+.venv/
+__pycache__/
+*.pyc
+data/
+.DS_Store
+
+# Local artifacts and non-source binaries
+*.zip
+*.log
+*.sqlite3
+*.sqlite
+*.db
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.ico
+*.crx
+*.jar
+3
+third_party/get_jobs/.git/
+third_party/get_jobs/.git.outer-hidden/
+scripts/node_modules

@@ -1,0 +1,24 @@
+{
+  "candidates": [
+    {"id": "candidate-001", "name": "Candidate 001"},
+    {"id": "candidate-002", "name": "Candidate 002"},
+    {"id": "candidate-003", "name": "Candidate 003"},
+    {"id": "candidate-004", "name": "Candidate 004"},
+    {"id": "candidate-005", "name": "Candidate 005"},
+    {"id": "candidate-006", "name": "Candidate 006"},
+    {"id": "candidate-007", "name": "Candidate 007"},
+    {"id": "candidate-008", "name": "Candidate 008"},
+    {"id": "candidate-009", "name": "Candidate 009"},
+    {"id": "candidate-010", "name": "Candidate 010"},
+    {"id": "candidate-011", "name": "Candidate 011"},
+    {"id": "candidate-012", "name": "Candidate 012"},
+    {"id": "candidate-013", "name": "Candidate 013"},
+    {"id": "candidate-014", "name": "Candidate 014"},
+    {"id": "candidate-015", "name": "Candidate 015"},
+    {"id": "candidate-016", "name": "Candidate 016"},
+    {"id": "candidate-017", "name": "Candidate 017"},
+    {"id": "candidate-018", "name": "Candidate 018"},
+    {"id": "candidate-019", "name": "Candidate 019"},
+    {"id": "candidate-020", "name": "Candidate 020"}
+  ]
+}

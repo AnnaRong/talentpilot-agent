@@ -1,0 +1,24 @@
+{
+  "metadata": {
+    "captured_at": "2026-09-18T00:00:00+08:00",
+    "tenant": "example-authorized-tenant",
+    "user": "example-authorized-user",
+    "scope": "example only"
+  },
+  "positions": [
+    {"job_id": "J103039", "job_name": "AI测试开发工程师", "department": "示例部门", "hiring_manager": "未展示", "request_owner": "未展示", "publisher": "未展示", "screening_owner": "未展示"}
+  ],
+  "candidates": [
+    {"candidate_id": "candidate-001", "job_id": "J103039", "name": "示例候选人", "stage": "一面", "status": "已安排"}
+  ],
+  "interviews": [
+    {"candidate_id": "candidate-001", "job_id": "J103039", "round": "一面", "interviewer": "未展示", "status": "scheduled", "result": "", "feedback": ""}
+  ],
+  "offers": [],
+  "coverage": {
+    "positions": "example",
+    "candidates": "example",
+    "interviews": "example",
+    "feedback": "unavailable"
+  }
+}

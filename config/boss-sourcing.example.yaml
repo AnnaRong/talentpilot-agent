@@ -1,0 +1,31 @@
+search:
+  keywords: [AI产品经理, 大模型产品]
+  city: 北京
+  experience: 3-5年
+  status: [在职-考虑机会, 离职-随时到岗]
+
+candidate_filter:
+  keywords:
+    values: [AI, 产品]
+    match: all
+  experience:
+    min_years: 3
+    max_years: 6
+  activity:
+    max_inactive_days: 7
+  age:
+    max: 35
+  salary:
+    max_k: 40
+  exclude_status: [暂不考虑]
+
+scoring:
+  required_keywords: [产品]
+  bonus_keywords: [RAG, Agent, 从0到1]
+
+top_n: 15
+
+schedule:
+  enabled: false
+  hour: 11
+  minute: 0

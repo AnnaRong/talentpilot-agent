@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>保存海外候选人</title>
+<link rel="stylesheet" href="popup.css">
+<main>
+  <h1>保存海外候选人</h1>
+  <label for="job">招聘岗位</label>
+  <select id="job" disabled><option>正在读取岗位</option></select>
+  <div class="grid">
+    <div><label for="region">候选人地区</label><input id="region" value="海外"></div>
+    <div><label for="retention">保留天数</label><input id="retention" type="number" min="1" max="366" value="90"></div>
+  </div>
+  <label for="evidence">授权依据</label>
+  <input id="evidence" placeholder="例如：候选人公开求职资料，用于本岗位招聘">
+  <label class="check"><input id="confirmed" type="checkbox">已确认本次处理符合适用规则并获得必要授权</label>
+  <button id="collect" disabled>保存当前候选人</button>
+  <p id="status" role="status">请先在 TalentPilot 刷新岗位。</p>
+</main>
+<script src="popup.js"></script>
+</html>

@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>iTalentPilot Agent</title>
+  <style>
+    :root { color-scheme: light; font-family: -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; color:#202124; background:#f6f7f9; }
+    body { margin:0; } main { max-width:1120px; margin:0 auto; padding:32px 22px 64px; }
+    header { display:flex; justify-content:space-between; align-items:flex-end; gap:24px; margin-bottom:24px; }
+    h1 { margin:0; font-size:28px; letter-spacing:0; } h2 { font-size:17px; margin:0 0 14px; }
+    .muted { color:#6b7280; font-size:13px; } .grid { display:grid; grid-template-columns:1.1fr .9fr; gap:18px; }
+    section { background:#fff; border:1px solid #e2e5e9; border-radius:8px; padding:20px; box-shadow:0 1px 2px #00000008; }
+    label { display:block; font-size:13px; color:#4b5563; margin:12px 0 6px; } input,select,textarea { width:100%; box-sizing:border-box; padding:10px 11px; border:1px solid #d1d5db; border-radius:6px; font:inherit; }
+    textarea { min-height:76px; resize:vertical; } button { border:0; border-radius:6px; padding:10px 14px; background:#1d4ed8; color:#fff; font-weight:600; cursor:pointer; } button.secondary { background:#eef2ff; color:#1d4ed8; } button.warn { background:#b45309; }
+    .row { display:flex; gap:10px; align-items:center; } .row > * { flex:1; } .status { display:inline-flex; padding:4px 8px; border-radius:999px; background:#eff6ff; color:#1d4ed8; font-size:12px; }
+    .item { border-top:1px solid #edf0f2; padding:12px 0; } .item:first-child { border-top:0; padding-top:0; } pre { white-space:pre-wrap; background:#f8fafc; padding:10px; border-radius:6px; font-size:12px; max-height:280px; overflow:auto; }
+    @media (max-width:760px) { .grid { grid-template-columns:1fr; } header { display:block; } header .muted { margin-top:8px; } }
+  </style>
+</head>
+<body>
+<main>
+  <header><div><h1>iTalentPilot Agent</h1><div class="muted">历史台账与旧版任务记录</div><a href="/console">打开主控制台</a></div><div id="health" class="status">连接中</div></header>
+  <section style="margin-bottom:18px">
+    <h2>本次已核对岗位</h2><a href="/api/exports/verified" download>下载重新核对的 Excel</a>
+    <div id="verified-jobs">尚未加载</div>
+  </section>
+  <div class="grid">
+    <section>
+      <h2>启动 Agent 任务</h2>
+      <div class="item" style="background:#fff7ed;border:1px solid #fed7aa;padding:10px;border-radius:6px;margin-bottom:12px">
+        <b>当前连接模式：授权浏览器采集后导入</b>
+        <div class="muted" id="snapshot-status">尚无本次校验结果</div>
+      </div>
+      <label>任务类型</label>
+      <select id="kind">
+        <option value="audit">iTalent 招聘审计</option>
+        <option value="recommendation_plan">20 份简历 8/12 推荐计划</option>
+        <option value="resume_screen">本地简历筛选</option>
+      </select>
+      <label>目标</label><textarea id="goal">统计当前授权 iTalent 招聘流程并生成招聘漏斗报告</textarea>
+      <label>输入文件路径（审计 capture.json 或简历目录）</label><input id="input" placeholder="/absolute/path/to/input">
+      <label>候选人清单路径（推荐计划 JSON）</label><input id="candidate" placeholder="/absolute/path/to/candidates.json">
+      <label>关键词（本地简历筛选，逗号分隔）</label><input id="keywords" placeholder="自动化测试, API, CI/CD">
+      <button id="start">启动任务</button>
+      <p class="muted">外部写入不会自动执行。推荐、下载、上传、推进、如流发布和超限排期会进入审批队列。</p>
+    </section>
+    <section>
+      <h2>系统状态</h2>
+      <div id="components" class="muted">读取中</div>
+      <h2 style="margin-top:24px">待审批</h2>
+      <div id="approvals">读取中</div>
+      <h2 style="margin-top:24px">录屏记录</h2>
+      <div id="recordings">读取中</div>
+    </section>
+  </div>
+  <section style="margin-top:18px">
+    <h2>任务记录（历史任务不代表本次结果）</h2><div id="runs">读取中</div>
+  </section>
+</main>
+<script>
+const $ = (id) => document.getElementById(id);
+async function get(path, options) { const response = await fetch(path, options); const data = await response.json(); if (!response.ok) throw new Error(data.detail || "请求失败"); return data; }
+function esc(value) { return String(value ?? "").replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+async function refresh() {
+  try {
+    const status = await get("/api/status"); $("health").textContent = "Agent 在线"; $("components").innerHTML = Object.entries(status.components).map(([k,v]) => `<div class="item"><b>${esc(k)}</b><span class="status">${esc(v)}</span></div>`).join("");
+    const snapshot = status.snapshot || {};
+    $("snapshot-status").textContent = snapshot.captured_at
+      ? `只读快照：${snapshot.captured_at}；${snapshot.scope}。非持续连接。`
+      : `北森数据尚未校验：${snapshot.state || "unknown"}`;
+    if (snapshot.captured_at) {
+      const data = await get("/api/italent/verified");
+      $("verified-jobs").innerHTML = `<p>${data.positions.length} 个岗位 · ${data.applications.length} 条申请关系 · ${new Set(data.interviews.map(i=>i.interview_id)).size} 场面试</p><p class="muted">快照完成：${esc(new Date(snapshot.captured_at).toLocaleString("zh-CN", {timeZone:"Asia/Shanghai"}))}（北京时间）；已发 Offer：未采集</p><details><summary>统计范围与缺口</summary><ul>${(snapshot.warnings || []).map(w=>`<li>${esc(w)}</li>`).join("")}</ul></details><div style="overflow:auto;max-height:520px"><table style="width:100%;text-align:left;border-collapse:collapse"><thead style="position:sticky;top:0;background:#fff"><tr><th>岗位编号</th><th>岗位</th><th>需求部门</th><th>已采集申请</th></tr></thead><tbody>${data.positions.map(p=>`<tr><td style="padding:8px">${esc(p.job_id)}</td><td>${esc(p.title)}</td><td>${esc(p.department)}</td><td>${p.process_name === "百度社招实习生招聘流程" ? data.applications.filter(a=>a.job_id===p.job_id).length : "未覆盖该流程"}</td></tr>`).join("")}</tbody></table></div>`;
+    } else { $("verified-jobs").textContent = "没有通过稳定 ID 和分页完整性校验的结果"; }
+    const approvals = await get("/api/approvals?status=pending");
+    $("approvals").innerHTML = approvals.length ? approvals.map(a => `<div class="item"><b>${esc(a.action)}</b><div class="muted">${esc(a.created_at)} · 旧审批已停用，需在新控制台重新发起</div></div>`).join("") : '<div class="muted">暂无待审批动作</div>';
+    const recordings = await get("/api/recordings");
+    $("recordings").innerHTML = recordings.length ? recordings.map(r => `<div class="item"><b>${esc(r.title)}</b><span class="status">${esc(r.status)}</span><div class="muted">${esc(r.backend)}</div><div class="muted">${esc(r.video_path || r.replay_path || r.directory)}</div></div>`).join("") : '<div class="muted">暂无录屏</div>';
+    const runs = await get("/api/runs");
+    $("runs").innerHTML = runs.length ? runs.map(r => `<div class="item"><div class="row"><b>${esc(r.kind)}</b><span class="status">${esc(r.status)}</span></div><div>${esc(r.goal)}</div><div class="muted">${esc(r.id)} · ${esc(r.current_agent || "")}</div>${r.output_path ? `<div class="muted">输出：${esc(r.output_path)}</div>` : ""}</div>`).join("") : '<div class="muted">暂无任务</div>';
+  } catch (error) { $("health").textContent = "需要登录或数据不可用"; $("components").textContent = error.message; }
+}
+async function decide(id, decision) { await get(`/api/approvals/${id}/decision`, {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({decision,note:"web console decision"})}); await refresh(); }
+$("start").onclick = async () => {
+  const options = { keywords: $("keywords").value.split(",").map(v => v.trim()).filter(Boolean), output_dir: "data/recommendation-plan" };
+  const body = { kind: $("kind").value, goal: $("goal").value, input_path: $("input").value || null, candidate_path: $("candidate").value || null, options };
+  try { await get("/api/runs", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(body)}); await refresh(); } catch (error) { alert(error.message); }
+};
+refresh(); setInterval(refresh, 2500);
+</script>
+</body>
+</html>

@@ -1,0 +1,17 @@
+allowBuilds:
+  sharp: set this to true or false
+  unrs-resolver: set this to true or false
+
+# pnpm 11 起 overrides 从 package.json 移到本文件。
+# 以下均为传递依赖的安全补丁，用于消除 Dependabot 告警：
+#   browserslist / flatted / ajv  -> 补丁级升级，安全
+#   minimatch / brace-expansion   -> eslint 链上的旧大版本，仅 pnpm lint 用到，
+#                                    不进构建产物也不进运行时
+# 未覆盖 glob：它来自 tailwindcss 的 sucrase，补丁要求跨到 v12（大版本），
+# 属构建期依赖，风险大于收益，因此保留该告警。
+overrides:
+  browserslist: "^4.28.7"
+  flatted: "^3.4.2"
+  ajv@^6: "^6.14.0"
+  minimatch@<9.0.7: "^9.0.7"
+  brace-expansion@<2.1.4: "^2.1.4"
