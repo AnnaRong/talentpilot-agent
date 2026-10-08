@@ -221,6 +221,46 @@ class OperationsApiTests(unittest.TestCase):
         self.assertEqual(response.json()["external_actions"], 0)
         search.assert_called_once_with(self.app.state.platform.store, "local-admin", job, content)
 
+    def test_talent_pool_recommendation_uses_preflight_then_confirm(self):
+        self.login()
+        prepared = {"recommendation_id": "r" * 32, "fingerprint": "f" * 64,
+                    "status": "ready_for_confirmation", "external_actions": 0}
+        with patch("talentpilot.talent_pool.prepare_recommendation", return_value=prepared) as preflight:
+            response = self.client.post("/api/platform/connectors/italent/talent-pool/recommend/preflight", json={
+                "batch_id": "b" * 32, "candidate_ids": ["A1"], "fingerprint": "p" * 64})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["status"], "ready_for_confirmation")
+        preflight.assert_called_once_with(self.app.state.platform.store, "local-admin",
+                                          "b" * 32, ["A1"], "p" * 64)
+        completed = {"status": "completed", "external_actions": 1}
+        with patch("talentpilot.talent_pool.execute_recommendation", return_value=completed) as execute:
+            response = self.client.post(
+                "/api/platform/connectors/italent/talent-pool/recommend/" + "r" * 32 + "/confirm",
+                json={"fingerprint": "f" * 64, "explicit_confirmation": True})
+        self.assertEqual(response.json()["external_actions"], 1)
+        execute.assert_called_once_with(self.app.state.platform.store, "local-admin",
+                                        "r" * 32, "f" * 64, True)
+
+    def test_boss_login_preview_and_confirm_endpoints_preserve_confirmation_gate(self):
+        self.login()
+        with patch("talentpilot.boss_sourcing.start_login",
+                   return_value={"status": "login_window_opened", "external_actions": 0}):
+            self.assertEqual(self.client.post("/api/platform/connectors/boss/login", json={}).status_code, 200)
+        preview = {"preview_id": "p" * 32, "fingerprint": "f" * 64,
+                   "status": "awaiting_confirmation", "external_actions": 0}
+        with patch("talentpilot.boss_sourcing.prepare_greetings", return_value=preview) as prepare:
+            response = self.client.post("/api/platform/connectors/boss/greetings/preview", json={
+                "batch_id": "b" * 32, "candidate_ids": ["c" * 64],
+                "fingerprint": "a" * 64})
+        self.assertEqual(response.json()["external_actions"], 0)
+        prepare.assert_called_once()
+        completed = {"status": "completed", "sent": 1, "external_actions": 1}
+        with patch("talentpilot.boss_sourcing.confirm_greetings", return_value=completed) as confirm:
+            response = self.client.post("/api/platform/connectors/boss/greetings/" + "p" * 32 + "/confirm", json={
+                "fingerprint": "f" * 64, "explicit_confirmation": True})
+        self.assertEqual(response.json()["external_actions"], 1)
+        self.assertTrue(confirm.call_args.args[-1])
+
     def test_removed_inventory_routes_are_not_exposed(self):
         self.login()
         self.assertEqual(self.client.post("/api/platform/connectors/italent/applications", json={}).status_code, 404)
@@ -264,11 +304,10 @@ class OperationsApiTests(unittest.TestCase):
             saved = self.client.post("/api/platform/connectors/email/save", json={
                 "job_id": "J_TEST", "provider": "百度邮箱", "intent_confirmed": True,
                 "files": [{"name": "简历.txt", "content_base64": encoded,
-                           "sha256": row["sha256"], "graduation_year": "2027届",
-                           "school": "示例大学", "candidate_name": "李雷"}]})
+                           "sha256": row["sha256"], "candidate_name": "李雷"}]})
         self.assertEqual(saved.status_code, 200)
         self.assertEqual(saved.json()["results"][0]["filename"],
-                         "产品实习生+2027届+示例大学+李雷.txt")
+                         "产品实习生+李雷.txt")
 
     def test_unmatched_resume_cannot_enter_upload_preview(self):
         with patch("talentpilot.platform_api.collect_positions_for_upload") as positions, \
@@ -327,6 +366,12 @@ class OperationsApiTests(unittest.TestCase):
             response = self.client.post("/api/platform/connectors/email/collections/" + "a" * 32 + "/resume", json={})
         self.assertEqual(response.json()["count"], 1)
         resume.assert_called_once()
+        with patch("talentpilot.email_recruiting.check_collection_login",
+                   return_value={"status": "logged_in", "logged_in": True}) as check:
+            response = self.client.post(
+                "/api/platform/connectors/email/collections/" + "a" * 32 + "/check", json={})
+        self.assertTrue(response.json()["logged_in"])
+        check.assert_called_once()
         with patch("talentpilot.email_recruiting.cancel_collection",
                    return_value={"status": "cancelled"}) as cancel:
             response = self.client.post("/api/platform/connectors/email/collections/" + "a" * 32 + "/cancel", json={})

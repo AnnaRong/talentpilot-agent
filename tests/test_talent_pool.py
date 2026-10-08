@@ -30,31 +30,97 @@ class TalentPoolWorkflowTests(unittest.TestCase):
         self.assertEqual(result["candidates"][0]["applicant_id"], "candidate-1")
         self.assertEqual(list(Path(self.temp.name).rglob("*.pdf")), [])
 
-    def test_confirmed_recommendation_fails_closed_without_live_write(self):
+    def test_preflight_binds_current_target_and_candidate_state(self):
         live = {"candidates": [{"applicant_id": "candidate-1", "name": "候选人甲"}],
                 "criteria": {}, "query_totals": {}, "source": "skill"}
         with patch.object(talent_pool, "_run_skill", return_value=live):
             preview = talent_pool.search(self.runtime.store, "local-admin", self.job, {})
-        result = talent_pool.recommend(self.runtime.store, "local-admin", preview["batch_id"],
-                                       ["candidate-1"], preview["fingerprint"], True)
-        self.assertEqual(result["status"], "blocked")
+        checked = {
+            "status": "ready_for_confirmation",
+            "target": {"job_id": "J_TEST", "title": "测试岗位",
+                       "department": "测试部门", "stage": "简历复筛/进行中"},
+            "candidates": [{"applicant_id": "candidate-1", "name": "候选人甲",
+                            "status": "eligible", "existing_jobs": []}],
+            "checked_at": "2026-10-07T03:00:00Z",
+        }
+        with patch("talentpilot.italent_recommendation.preflight", return_value=checked):
+            result = talent_pool.prepare_recommendation(
+                self.runtime.store, "local-admin", preview["batch_id"],
+                ["candidate-1"], preview["fingerprint"]
+            )
+        self.assertEqual(result["status"], "ready_for_confirmation")
         self.assertEqual(result["external_actions"], 0)
-        self.assertFalse(result["read_back"])
-        with self.assertRaises(ValueError):
-            talent_pool.recommend(self.runtime.store, "local-admin", preview["batch_id"],
-                                  ["candidate-1"], preview["fingerprint"], True)
+        self.assertEqual(len(result["fingerprint"]), 64)
+        with self.runtime.store.transaction() as cx:
+            row = cx.execute("SELECT payload FROM talent_pool_recommendations").fetchone()
+        self.assertNotIn(b"candidate-1", row["payload"])
 
-    def test_recommendation_requires_current_confirmation_and_preview_membership(self):
+    def test_preflight_requires_current_preview_membership(self):
         live = {"candidates": [{"applicant_id": "candidate-1", "name": "候选人甲"}],
                 "criteria": {}, "query_totals": {}, "source": "skill"}
         with patch.object(talent_pool, "_run_skill", return_value=live):
             preview = talent_pool.search(self.runtime.store, "local-admin", self.job, {})
         with self.assertRaisesRegex(ValueError, "来自当前预览"):
-            talent_pool.recommend(self.runtime.store, "local-admin", preview["batch_id"],
-                                  ["candidate-2"], preview["fingerprint"], True)
+            talent_pool.prepare_recommendation(
+                self.runtime.store, "local-admin", preview["batch_id"],
+                ["candidate-2"], preview["fingerprint"]
+            )
+
+    def test_execute_is_disabled_by_default_and_consumes_nothing(self):
+        recommendation = self._recommendation_preview()
+        with patch("talentpilot.italent_recommendation.write_enabled", return_value=False):
+            result = talent_pool.execute_recommendation(
+                self.runtime.store, "local-admin", recommendation["recommendation_id"],
+                recommendation["fingerprint"], True
+            )
+        self.assertEqual(result["status"], "blocked")
+        self.assertEqual(result["external_actions"], 0)
+        with self.runtime.store.transaction() as cx:
+            row = cx.execute("SELECT consumed FROM talent_pool_recommendations").fetchone()
+        self.assertEqual(row["consumed"], 0)
+
+    def test_execute_requires_confirmation_and_verified_read_back(self):
+        recommendation = self._recommendation_preview()
         with self.assertRaisesRegex(ValueError, "明确确认"):
-            talent_pool.recommend(self.runtime.store, "local-admin", preview["batch_id"],
-                                  ["candidate-1"], preview["fingerprint"], False)
+            talent_pool.execute_recommendation(
+                self.runtime.store, "local-admin", recommendation["recommendation_id"],
+                recommendation["fingerprint"], False
+            )
+        executed = {"status": "completed", "external_actions": 1,
+                    "results": [{"applicant_id": "candidate-1",
+                                 "status": "recommended_verified", "read_back": True}]}
+        with patch("talentpilot.italent_recommendation.write_enabled", return_value=True), \
+             patch("talentpilot.italent_recommendation.execute", return_value=executed):
+            result = talent_pool.execute_recommendation(
+                self.runtime.store, "local-admin", recommendation["recommendation_id"],
+                recommendation["fingerprint"], True
+            )
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(result["external_actions"], 1)
+        with self.assertRaisesRegex(ValueError, "已执行"):
+            talent_pool.execute_recommendation(
+                self.runtime.store, "local-admin", recommendation["recommendation_id"],
+                recommendation["fingerprint"], True
+            )
+
+    def _recommendation_preview(self):
+        live = {"candidates": [{"applicant_id": "candidate-1", "name": "候选人甲"}],
+                "criteria": {}, "query_totals": {}, "source": "skill"}
+        checked = {
+            "status": "ready_for_confirmation",
+            "target": {"job_id": "J_TEST", "title": "测试岗位",
+                       "department": "测试部门", "stage": "简历复筛/进行中"},
+            "candidates": [{"applicant_id": "candidate-1", "name": "候选人甲",
+                            "status": "eligible", "existing_jobs": []}],
+            "checked_at": "2026-10-07T03:00:00Z",
+        }
+        with patch.object(talent_pool, "_run_skill", return_value=live):
+            preview = talent_pool.search(self.runtime.store, "local-admin", self.job, {})
+        with patch("talentpilot.italent_recommendation.preflight", return_value=checked):
+            return talent_pool.prepare_recommendation(
+                self.runtime.store, "local-admin", preview["batch_id"],
+                ["candidate-1"], preview["fingerprint"]
+            )
 
 
 if __name__ == "__main__":

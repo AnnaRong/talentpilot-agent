@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>Label</key><string>com.local.talentpilot.agent</string>
+<key>ProgramArguments</key><array><string>/bin/sh</string><string>-c</string><string>exec .venv/bin/python -m talentpilot.cli serve --port 8779</string></array>
+<key>WorkingDirectory</key><string>__ROOT__</string>
+<key>RunAtLoad</key><true/><key>KeepAlive</key><true/><key>ProcessType</key><string>Background</string>
+<key>EnvironmentVariables</key><dict><key>PATH</key><string>__HOME__/.icode/bin:__HOME__/.nvm/versions/node/v24.20.0/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string><key>PYTHONUNBUFFERED</key><string>1</string></dict>
+<key>StandardOutPath</key><string>__ROOT__/data/talentpilot-agent.log</string>
+<key>StandardErrorPath</key><string>__ROOT__/data/talentpilot-agent.log</string>
+</dict></plist>

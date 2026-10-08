@@ -51,6 +51,16 @@ class PlatformAdvisorTests(unittest.TestCase):
             platform_advisor._parse({"complete": False, "question": "问题",
                                      "recommended_answer": "推荐", "rationale": "原因"}, 6)
 
+    def test_gateway_error_is_fast_and_actionable(self):
+        response = Mock(status_code=404)
+        client = Mock(); client.post.return_value = response
+        with patch.dict(os.environ, {"LLM_EGRESS_ENABLED": "1",
+                                     "LLM_ALLOWED_HOST": "gateway.test"}), patch.object(
+                settings, "llm_api_key", "test-only"), patch.object(
+                settings, "llm_base_url", "https://gateway.test/v1"):
+            with self.assertRaisesRegex(ValueError, "HTTP 404"):
+                platform_advisor.interview("邮箱", {"job_id": "J1"}, [], client)
+
 
 if __name__ == "__main__":
     unittest.main()

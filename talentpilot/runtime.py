@@ -77,6 +77,8 @@ class Runtime:
         initialize_boss_sourcing(self.store)
         from .lock_monitor import initialize as initialize_lock_monitor
         initialize_lock_monitor(self.store)
+        from .autonomous import initialize as initialize_autonomous
+        initialize_autonomous(self.store)
         self.stop_event = threading.Event()
         self.thread = None
 
@@ -193,9 +195,12 @@ class Runtime:
                     dispatch_lock_monitor(self)
                     from .boss_sourcing import dispatch_due as dispatch_boss_sourcing
                     dispatch_boss_sourcing(self.store)
+                    from .autonomous import dispatch_due as dispatch_autonomous, tick as autonomous_tick
+                    dispatch_autonomous(self.store)
+                    autonomous_work = autonomous_tick(self)
                     from .live_runs import tick as live_tick
                     live_work = live_tick(self)
-                    if not self.tick() and not live_work:
+                    if not self.tick() and not live_work and not autonomous_work:
                         self.stop_event.wait(0.5)
                 except Exception:
                     self.stop_event.wait(2)
@@ -225,9 +230,13 @@ class Runtime:
             "agents": [asdict(a) for a in AGENTS.values()],
             "queue": "SQLite persistent queue; single local worker; crash leases",
             "external": {
-                "italent": {"state": "live_job_application_interview_inventory", "write_enabled": False,
+                "italent": {"state": "live_inventory_and_gated_recommendation",
+                            "recommendation_preflight": "authenticated_browser_exact_target_and_duplicate_check",
+                            "write_enabled": __import__("os").getenv("ITALENT_RECOMMEND_WRITE_ENABLED") == "1",
+                            "write_requires": "current confirmation, five-minute fingerprint, immediate GetJoblistOfApplicant read-back",
                             "feedback_body_refresh": False},
-                "autonomous_reads": {"state": "durable_live_collection_dag", "external_write": False,
+                "autonomous_reads": {"state": "daily_durable_recruiting_workflow", "external_write": False,
+                                     "schedule": "11:00 Asia/Shanghai",
                                      "steps": ["positions", "applications", "interviews", "validate_import", "audit", "report"],
                                      "export": "requires_explicit_approval"},
                 "boss": {"state": "cli_search_and_local_review",
@@ -243,7 +252,8 @@ class Runtime:
                              "automatic_outreach": False},
                 "email": {"state": "human_login_then_agent_collects_and_saves",
                           "credentials_stored": False, "automatic_mailbox_access_after_handoff": True,
-                          "filename": "job+graduation_year+school+name"},
+                          "attachment_type": "pdf",
+                          "filename": "job+name"},
                 "notification": {"state": "local_inbox_only", "external_send": False},
                 "lock_monitor": {"state": "live_read_only_monitor_local_reminders",
                                  "recall": "skill_integrated_write_blocked_pending_verification",
@@ -255,9 +265,9 @@ class Runtime:
                 "knowledge": {"state": "encrypted_local_source_retrieval", "method": "lexical_not_vector"},
                 "candidate_history": {"state": "batch_resume_to_italent_read_only_match",
                          "identity": "resume_contact_or_name_with_manual_review", "ats_write": False},
-                "talent_pool": {"state": "skill_backed_search_preview",
+                "talent_pool": {"state": "skill_search_and_authenticated_recommendation_preflight",
                                 "search": "screen-italent-resumes; no PDF download",
-                                "recommendation": "blocked_pending_authenticated_write_and_read_back"},
+                                "recommendation": "explicit confirmation and immediate per-candidate read-back; write switch defaults off"},
                 "resume_upload": {"state": "preview_ready_write_blocked_pending_live_verification",
                          "target": "简历复筛/进行中", "defaults": "BOSS直聘/主动投递"},
             },

@@ -93,6 +93,12 @@ class LiveRequest(Strict):
     request_key: str = Field(min_length=8, max_length=200)
 
 
+class AutonomousSettingsRequest(Strict):
+    enabled: bool = True
+    hour: int = Field(default=11, ge=0, le=23)
+    minute: int = Field(default=0, ge=0, le=59)
+
+
 class ResumeRequest(Strict):
     dataset_id: str
     candidate_id: str = Field(min_length=1, max_length=100)
@@ -183,6 +189,17 @@ class BossSearchRequest(Strict):
     yaml_content: str = Field(min_length=20, max_length=20_000)
 
 
+class BossGreetingPreviewRequest(Strict):
+    batch_id: str = Field(min_length=32, max_length=32)
+    candidate_ids: list[str] = Field(min_length=1, max_length=20)
+    fingerprint: str = Field(min_length=64, max_length=64)
+
+
+class BossGreetingConfirmRequest(Strict):
+    fingerprint: str = Field(min_length=64, max_length=64)
+    explicit_confirmation: bool = False
+
+
 class TalentPoolSearchRequest(Strict):
     job_id: str = Field(min_length=1, max_length=100)
     school_types: list[str] = Field(default_factory=list, max_length=10)
@@ -196,9 +213,13 @@ class TalentPoolSearchRequest(Strict):
     page_size: Literal[15, 30, 60, 100, 300] = 100
 
 
-class TalentPoolRecommendRequest(Strict):
+class TalentPoolRecommendPreflightRequest(Strict):
     batch_id: str = Field(min_length=16, max_length=64)
     candidate_ids: list[str] = Field(min_length=1, max_length=20)
+    fingerprint: str = Field(min_length=64, max_length=64)
+
+
+class TalentPoolRecommendConfirmRequest(Strict):
     fingerprint: str = Field(min_length=64, max_length=64)
     explicit_confirmation: bool = False
 
@@ -254,8 +275,6 @@ class EmailPreviewRequest(Strict):
 
 class EmailSaveItem(EmailAttachment):
     sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
-    graduation_year: str = Field(min_length=5, max_length=5)
-    school: str = Field(min_length=1, max_length=100)
     candidate_name: str = Field(min_length=1, max_length=100)
 
 
@@ -269,6 +288,11 @@ class EmailSaveRequest(Strict):
 class EmailCollectionStartRequest(Strict):
     job_id: str = Field(min_length=1, max_length=100)
     provider: Literal["百度邮箱", "QQ邮箱", "网易邮箱", "Outlook", "Gmail"]
+
+
+class ConnectorLoginConfirmation(Strict):
+    provider: Literal["BOSS直聘", "QQ邮箱"]
+    url: str = Field(min_length=20, max_length=2048)
 
 
 @router.post("/resumes/register")
@@ -385,6 +409,38 @@ def control_live(request: Request, run_id: str, operation: Literal["resume", "ca
     from . import live_runs
     live_runs.control(runtime, run_id, actor["id"], operation)
     return {"operation": operation, "run_id": run_id}
+
+
+@router.get("/autonomous")
+def autonomous_overview(request: Request):
+    runtime, actor = components(request)
+    require(actor, {"admin"})
+    from .autonomous import overview
+    return overview(runtime.store, actor["id"])
+
+
+@router.post("/autonomous/settings")
+def autonomous_settings(request: Request, body: AutonomousSettingsRequest):
+    runtime, actor = components(request)
+    require(actor, {"admin"})
+    from .autonomous import configure
+    return configure(runtime.store, actor["id"], **body.model_dump())
+
+
+@router.post("/autonomous/run")
+def autonomous_run_now(request: Request):
+    runtime, actor = components(request)
+    require(actor, {"admin"})
+    from .autonomous import run_now
+    return {"run_id": run_now(runtime.store, actor["id"])}
+
+
+@router.post("/autonomous/steps/{step}/run")
+def autonomous_run_step(request: Request, step: int):
+    runtime, actor = components(request)
+    require(actor, {"admin"})
+    from .autonomous import rerun_step
+    return {"run_id": rerun_step(runtime.store, actor["id"], step - 1)}
 
 
 @router.post("/recordings")
@@ -535,6 +591,41 @@ def search_boss_candidates(request: Request, body: BossSearchRequest):
     return search_and_rank(runtime.store, actor["id"], position, body.yaml_content)
 
 
+@router.post("/connectors/boss/configure-from-jd")
+def configure_boss_from_jd(request: Request):
+    runtime, actor = components(request)
+    require(actor, {"admin"})
+    from .boss_sourcing import configure_all_from_jd
+    result = collect_position_overview()
+    return configure_all_from_jd(runtime.store, actor["id"], result["positions"])
+
+
+@router.post("/connectors/boss/login")
+def login_boss(request: Request):
+    _, actor = components(request)
+    require(actor, {"admin"})
+    from .boss_sourcing import start_login
+    return start_login()
+
+
+@router.post("/connectors/boss/greetings/preview")
+def preview_boss_greetings(request: Request, body: BossGreetingPreviewRequest):
+    runtime, actor = components(request)
+    require(actor, {"admin"})
+    from .boss_sourcing import prepare_greetings
+    return prepare_greetings(runtime.store, actor["id"], body.batch_id, body.candidate_ids,
+                             body.fingerprint)
+
+
+@router.post("/connectors/boss/greetings/{preview_id}/confirm")
+def confirm_boss_greetings(request: Request, preview_id: str, body: BossGreetingConfirmRequest):
+    runtime, actor = components(request)
+    require(actor, {"admin"})
+    from .boss_sourcing import confirm_greetings
+    return confirm_greetings(runtime.store, actor["id"], preview_id, body.fingerprint,
+                             body.explicit_confirmation)
+
+
 @router.get("/connectors/platform-advisor/status")
 def platform_advisor_status(request: Request):
     _, actor = components(request)
@@ -572,13 +663,23 @@ def search_talent_pool(request: Request, body: TalentPoolSearchRequest):
         raise HTTPException(409, str(error)) from error
 
 
-@router.post("/connectors/italent/talent-pool/recommend")
-def recommend_talent_pool(request: Request, body: TalentPoolRecommendRequest):
+@router.post("/connectors/italent/talent-pool/recommend/preflight")
+def preflight_talent_pool_recommendation(request: Request, body: TalentPoolRecommendPreflightRequest):
     runtime, actor = components(request)
     require(actor, {"admin"})
-    from .talent_pool import recommend
-    return recommend(runtime.store, actor["id"], body.batch_id, body.candidate_ids,
-                     body.fingerprint, body.explicit_confirmation)
+    from .talent_pool import prepare_recommendation
+    return prepare_recommendation(runtime.store, actor["id"], body.batch_id,
+                                  body.candidate_ids, body.fingerprint)
+
+
+@router.post("/connectors/italent/talent-pool/recommend/{recommendation_id}/confirm")
+def confirm_talent_pool_recommendation(request: Request, recommendation_id: str,
+                                       body: TalentPoolRecommendConfirmRequest):
+    runtime, actor = components(request)
+    require(actor, {"admin"})
+    from .talent_pool import execute_recommendation
+    return execute_recommendation(runtime.store, actor["id"], recommendation_id,
+                                  body.fingerprint, body.explicit_confirmation)
 
 
 @router.get("/connectors/overseas/jobs")
@@ -670,6 +771,14 @@ def resume_email_collection(request: Request, run_id: str):
     return resume_collection(runtime.store, actor["id"], run_id)
 
 
+@router.post("/connectors/email/collections/{run_id}/check")
+def check_email_collection_login(request: Request, run_id: str):
+    runtime, actor = components(request)
+    require(actor, {"admin"})
+    from .email_recruiting import check_collection_login
+    return check_collection_login(runtime.store, actor["id"], run_id)
+
+
 @router.post("/connectors/email/collections/{run_id}/cancel")
 def cancel_email_collection(request: Request, run_id: str):
     runtime, actor = components(request)
@@ -687,6 +796,14 @@ def save_email_resumes(request: Request, body: EmailSaveRequest):
     job = latest_position(runtime.store, body.job_id)
     return save(runtime.store, actor["id"], job, body.provider, body.intent_confirmed,
                 [item.model_dump() for item in body.files])
+
+
+@router.post("/connectors/login-confirmation")
+def confirm_connector_login(request: Request, body: ConnectorLoginConfirmation):
+    runtime, actor = components(request)
+    require(actor, {"admin"})
+    from .email_recruiting import confirm_external_login
+    return confirm_external_login(runtime.store, actor["id"], body.provider, body.url)
 
 
 @router.get("/panels")

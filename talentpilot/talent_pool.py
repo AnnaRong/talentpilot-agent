@@ -33,6 +33,11 @@ def initialize(store):
           id TEXT PRIMARY KEY, actor TEXT NOT NULL, job_id TEXT NOT NULL,
           target_stage TEXT NOT NULL, payload BLOB NOT NULL, payload_hash TEXT NOT NULL,
           status TEXT NOT NULL, expires REAL NOT NULL, created_at TEXT NOT NULL, result BLOB)""")
+        cx.execute("""CREATE TABLE IF NOT EXISTS talent_pool_recommendations (
+          id TEXT PRIMARY KEY, actor TEXT NOT NULL, batch_id TEXT NOT NULL,
+          payload BLOB NOT NULL, fingerprint TEXT NOT NULL, expires REAL NOT NULL,
+          consumed INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL,
+          created_at TEXT NOT NULL, result BLOB)""")
 
 
 def normalize_query(payload: dict[str, Any]) -> dict[str, Any]:
@@ -144,28 +149,74 @@ def search(store, actor: str, job: dict[str, Any], raw_query: dict[str, Any]) ->
             "query_totals": payload["query_totals"], "external_actions": 0}
 
 
-def recommend(store, actor: str, batch_id: str, candidate_ids: list[str], fingerprint: str,
-              explicit_confirmation: bool) -> dict[str, Any]:
+def _preview(store, actor: str, batch_id: str, fingerprint: str) -> tuple[Any, dict[str, Any]]:
     with store.transaction() as cx:
         row = cx.execute("SELECT * FROM talent_pool_batches WHERE id=?", (batch_id,)).fetchone()
-        if not row or row["actor"] != actor or row["status"] != "preview" or row["expires"] < time.time():
-            raise ValueError("人才库推荐预览不存在、已过期或已执行")
-        if row["payload_hash"] != fingerprint:
-            raise ValueError("候选人名单或目标岗位已变化，请重新检索")
-        payload = store.unseal(row["payload"])
-        available = {candidate["applicant_id"] for candidate in payload["candidates"]}
-        selected = list(dict.fromkeys(candidate_ids))
-        if not selected or len(selected) > 20 or not set(selected).issubset(available):
-            raise ValueError("推荐候选人必须来自当前预览，且单批不超过20人")
-        if not explicit_confirmation:
-            raise ValueError("推荐到复筛前需要当前轮明确确认")
-        result = {"status": "blocked", "external_actions": 0,
-                  "reason": "iTalent 推荐写入传输和写后回读尚未完成受控验真；本次未推荐。",
-                  "job_id": payload["job"]["job_id"], "target_stage": payload["target_stage"],
-                  "candidate_count": len(selected), "candidate_ids": selected,
-                  "confirmation_fingerprint": fingerprint,
-                  "read_back": False}
-        cx.execute("UPDATE talent_pool_batches SET status='blocked',result=? WHERE id=?",
-                   (store.seal(result), batch_id))
-        store.audit(cx, actor, "talent_pool.recommend_blocked_unverified_connector", batch_id)
+    if not row or row["actor"] != actor or row["status"] != "preview" or row["expires"] < time.time():
+        raise ValueError("人才库推荐预览不存在、已过期或已执行")
+    if row["payload_hash"] != fingerprint:
+        raise ValueError("候选人名单或目标岗位已变化，请重新检索")
+    return row, store.unseal(row["payload"])
+
+
+def prepare_recommendation(store, actor: str, batch_id: str, candidate_ids: list[str],
+                           fingerprint: str) -> dict[str, Any]:
+    _, payload = _preview(store, actor, batch_id, fingerprint)
+    available = {candidate["applicant_id"]: candidate for candidate in payload["candidates"]}
+    selected_ids = list(dict.fromkeys(candidate_ids))
+    if not selected_ids or len(selected_ids) > 20 or not set(selected_ids).issubset(available):
+        raise ValueError("推荐候选人必须来自当前预览，且单批不超过20人")
+    from .italent_recommendation import preflight
+    checked = preflight(payload["job"], [available[value] for value in selected_ids], payload["target_stage"])
+    recommendation_id = uuid.uuid4().hex
+    recommendation = {"recommendation_id": recommendation_id, "batch_id": batch_id,
+                      "target": checked["target"], "candidates": checked["candidates"],
+                      "checked_at": checked.get("checked_at"),
+                      "status": "ready_for_confirmation", "external_actions": 0}
+    confirmation = digest({"recommendation_id": recommendation_id, "actor": actor,
+                           "batch_fingerprint": fingerprint, "target": recommendation["target"],
+                           "candidates": recommendation["candidates"],
+                           "checked_at": recommendation["checked_at"]})
+    with store.transaction() as cx:
+        cx.execute("INSERT INTO talent_pool_recommendations VALUES (?,?,?,?,?,?,0,?,?,NULL)",
+                   (recommendation_id, actor, batch_id, store.seal(recommendation), confirmation,
+                    time.time() + 300, recommendation["status"], utcnow()))
+        store.audit(cx, actor, "talent_pool.recommendation_preflight", recommendation_id)
+    return {**recommendation, "fingerprint": confirmation, "expires_in": 300}
+
+
+def execute_recommendation(store, actor: str, recommendation_id: str, fingerprint: str,
+                           explicit_confirmation: bool) -> dict[str, Any]:
+    if not explicit_confirmation:
+        raise ValueError("推荐到复筛前需要当前轮明确确认")
+    with store.transaction() as cx:
+        row = cx.execute("SELECT * FROM talent_pool_recommendations WHERE id=?",
+                         (recommendation_id,)).fetchone()
+    if not row or row["actor"] != actor:
+        raise ValueError("推荐确认单不存在或不属于当前用户")
+    if row["consumed"]:
+        raise ValueError("推荐确认单已执行")
+    if row["expires"] <= time.time() or row["fingerprint"] != fingerprint:
+        raise ValueError("推荐确认单已过期或发生变化，请重新预检")
+    from .italent_recommendation import execute, write_enabled
+    if not write_enabled():
+        return {"status": "blocked", "reason": "实时预检已接通；生产推荐写入开关尚未启用",
+                "external_actions": 0, "read_back": False}
+    with store.transaction() as cx:
+        claimed = cx.execute("UPDATE talent_pool_recommendations SET consumed=1,status='running' "
+                             "WHERE id=? AND consumed=0", (recommendation_id,))
+    if claimed.rowcount != 1:
+        raise ValueError("推荐确认单已执行")
+    payload = store.unseal(row["payload"])
+    try:
+        result = execute(payload)
+    except Exception as error:
+        result = {"status": "uncertain", "reason": str(error)[:400], "external_actions": 0,
+                  "read_back": False, "retry_allowed": False}
+    with store.transaction() as cx:
+        cx.execute("UPDATE talent_pool_recommendations SET status=?,result=? WHERE id=?",
+                   (result["status"], store.seal(result), recommendation_id))
+        cx.execute("UPDATE talent_pool_batches SET status=?,result=? WHERE id=?",
+                   (result["status"], store.seal(result), row["batch_id"]))
+        store.audit(cx, actor, "talent_pool.recommendation_executed", recommendation_id)
     return result

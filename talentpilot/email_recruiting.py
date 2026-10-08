@@ -8,6 +8,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import uuid
 from pathlib import Path
@@ -149,17 +150,81 @@ def _ego(payload: dict, timeout: int) -> dict:
     data = json.loads(records[-1])
     if data.get("state") == "failed":
         raise ValueError(data.get("reason") or "邮箱 Agent 执行失败")
+    if sys.platform == "darwin" and data.get("state") in {"awaiting_login", "login_checked"}:
+        subprocess.run(["open", "-a", "ego lite"], capture_output=True, timeout=10, check=False)
     return data
+
+
+def probe_logged_in_mailbox(provider: str = "QQ邮箱") -> dict:
+    if provider != "QQ邮箱":
+        raise ValueError("当前后台登录核验仅支持 QQ邮箱")
+    executable = shutil.which("ego-browser")
+    if not executable:
+        raise ValueError("Ego Browser 不可用，无法核验 QQ 邮箱")
+    source = r"""
+const spaces=await listTaskSpaces(); let found=null;
+for(const space of spaces){
+  try{const task=await claimTaskSpace(space.id); const tabs=await task.tabs();
+    const tab=tabs.find(item=>/^https:\/\/wx\.mail\.qq\.com\/home\/index\?/.test(item.url)&&item.url.includes('sid='));
+    if(tab){await task.adopt(tab.page,{as:'mailbox'}); const text=await snapshotText(); found={task_id:task.id,url:tab.url,logged_in:/收件箱|写信/.test(text)}; break;}
+  }catch(_error){}
+}
+cliLog('TALENTPILOT_MAIL_PROBE:'+JSON.stringify(found||{logged_in:false}));
+"""
+    result = subprocess.run([executable, "nodejs"], input=source, text=True,
+                            capture_output=True, timeout=45)
+    records = [line.split("TALENTPILOT_MAIL_PROBE:", 1)[1]
+               for line in (result.stdout + "\n" + result.stderr).splitlines()
+               if line.startswith("TALENTPILOT_MAIL_PROBE:")]
+    if result.returncode or not records:
+        raise ValueError("无法核验 QQ 邮箱登录态")
+    import json
+    data = json.loads(records[-1])
+    return {"logged_in": bool(data.get("logged_in")),
+            "detail": "已核验 QQ 邮箱收件箱登录态" if data.get("logged_in") else "QQ 邮箱登录态未共享到后台任务空间"}
+
+
+def confirm_external_login(store, actor: str, provider: str, url: str) -> dict:
+    allowed = {"BOSS直聘": "https://www.zhipin.com/web/chat/index",
+               "QQ邮箱": "https://wx.mail.qq.com/home/index"}
+    if provider not in allowed or not url.startswith(allowed[provider]):
+        raise ValueError("登录确认必须来自受支持平台的已登录首页")
+    from .platform_store import utcnow
+    value = {"provider": provider, "confirmed_by": actor, "confirmed_at": utcnow(),
+             "state": "user_confirmed_visible_login", "credentials_stored": False}
+    with store.transaction() as cx:
+        cx.execute("CREATE TABLE IF NOT EXISTS connector_login_confirmations (provider TEXT PRIMARY KEY,payload BLOB NOT NULL,updated_at TEXT NOT NULL)")
+        cx.execute("INSERT OR REPLACE INTO connector_login_confirmations VALUES (?,?,?)",
+                   (provider, store.seal(value), value["confirmed_at"]))
+        store.audit(cx, actor, "connector.login_confirmed", provider)
+    return value
+
+
+def confirmed_login(store, provider: str) -> dict | None:
+    with store.transaction() as cx:
+        cx.execute("CREATE TABLE IF NOT EXISTS connector_login_confirmations (provider TEXT PRIMARY KEY,payload BLOB NOT NULL,updated_at TEXT NOT NULL)")
+        row = cx.execute("SELECT payload FROM connector_login_confirmations WHERE provider=?", (provider,)).fetchone()
+    return store.unseal(row["payload"]) if row else None
 
 
 def start_collection(store, actor: str, job: dict, provider: str) -> dict:
     if provider not in PROVIDERS:
         raise ValueError("请选择支持的邮箱")
     with store.transaction() as cx:
-        active = cx.execute("SELECT id FROM email_collection_runs WHERE actor=? AND status='awaiting_login'",
+        active = cx.execute("SELECT * FROM email_collection_runs WHERE actor=? AND status='awaiting_login'",
                             (actor,)).fetchone()
     if active:
-        raise ValueError("已有邮箱登录任务等待继续，请先完成当前任务")
+        payload = store.unseal(active["payload"])
+        if active["job_id"] != job["job_id"] or payload.get("provider") != provider:
+            raise ValueError("已有邮箱登录任务用于其他岗位或邮箱，请先关闭当前任务")
+        result = _ego({"operation": "show", "task_id": payload["task_id"],
+                       "provider_url": PROVIDERS[provider]}, 45)
+        if result.get("state") != "awaiting_login" or not result.get("handoff_completed"):
+            raise ValueError("未能重新打开邮箱登录页面")
+        return {"run_id": active["id"], "status": "awaiting_login",
+                "task_id": payload["task_id"], "job_id": job["job_id"],
+                "job_title": job["title"], "provider": provider, "resumed": True,
+                "instruction": "已恢复等待登录的邮箱页面。完成登录后点击“检查是否已登录”。"}
     run_id = uuid.uuid4().hex
     result = _ego({"operation": "start", "run_id": run_id,
                    "provider_url": PROVIDERS[provider]}, 60)
@@ -208,18 +273,16 @@ def resume_collection(store, actor: str, run_id: str) -> dict:
             saved = {"status": "completed", "count": 0, "results": [],
                      "directory": str(settings.email_resumes_dir / _clean(payload["job"]["title"])),
                      "reviewed": result.get("reviewed", []),
-                     "limitation": "没有找到同时具备明确岗位意向和 PDF/DOCX 简历附件的邮件。"}
+                     "limitation": "没有找到同时具备明确岗位意向和 PDF 简历附件的邮件。"}
         else:
             parsed = preview(files)["results"]
             ready, skipped = [], []
             for attachment, metadata in zip(files, parsed):
-                if metadata.get("needs_review"):
+                if not metadata.get("candidate_name"):
                     skipped.append({"filename": metadata["original_name"],
-                                    "reason": "毕业年份、学校或姓名无法可靠识别"})
+                                    "reason": "姓名无法可靠识别"})
                     continue
                 ready.append({**attachment, "sha256": metadata["sha256"],
-                              "graduation_year": metadata["graduation_year"],
-                              "school": metadata["school"],
                               "candidate_name": metadata["candidate_name"]})
             saved = save(store, actor, payload["job"], payload["provider"], True, ready) if ready else {
                 "status": "completed", "count": 0, "results": [],
@@ -240,6 +303,22 @@ def resume_collection(store, actor: str, run_id: str) -> dict:
         shutil.rmtree(download_dir, ignore_errors=True)
 
 
+def check_collection_login(store, actor: str, run_id: str) -> dict:
+    with store.transaction() as cx:
+        row = cx.execute("SELECT * FROM email_collection_runs WHERE id=?", (run_id,)).fetchone()
+    if not row or row["actor"] != actor or row["status"] != "awaiting_login":
+        raise ValueError("邮箱收集任务不存在、已结束或不属于当前用户")
+    payload = store.unseal(row["payload"])
+    result = _ego({"operation": "check", "task_id": payload["task_id"]}, 45)
+    if result.get("state") != "login_checked" or not result.get("handoff_completed"):
+        raise ValueError("未能核验邮箱登录状态")
+    logged_in = bool(result.get("logged_in"))
+    return {"run_id": run_id, "status": "logged_in" if logged_in else "awaiting_login",
+            "logged_in": logged_in,
+            "instruction": ("已确认邮箱账号登录，可以开始扫描简历。" if logged_in else
+                            "尚未检测到已登录的邮箱收件箱，请在邮箱页面完成登录后再次检查。")}
+
+
 def cancel_collection(store, actor: str, run_id: str) -> dict:
     with store.transaction() as cx:
         row = cx.execute("SELECT * FROM email_collection_runs WHERE id=?", (run_id,)).fetchone()
@@ -253,15 +332,11 @@ def cancel_collection(store, actor: str, run_id: str) -> dict:
     return {"run_id": run_id, "status": "cancelled"}
 
 
-def _validated_metadata(item: dict) -> tuple[str, str, str]:
-    year = str(item.get("graduation_year") or "").strip()
-    if not re.fullmatch(r"20\d{2}届", year) or not 2000 <= int(year[:4]) <= 2040:
-        raise ValueError("请为每份简历确认20xx届毕业年份")
-    school = _clean(item.get("school") or "")
+def _validated_metadata(item: dict) -> str:
     person = _clean(item.get("candidate_name") or "")
-    if not school or not person:
-        raise ValueError("请为每份简历确认学校和姓名")
-    return year, school, person
+    if not person:
+        raise ValueError("请为每份简历确认姓名")
+    return person
 
 
 def save(store, actor: str, job: dict, provider: str, intent_confirmed: bool, files: list[dict]) -> dict:
@@ -283,13 +358,13 @@ def save(store, actor: str, job: dict, provider: str, intent_confirmed: bool, fi
         actual_hash = hashlib.sha256(content).hexdigest()
         if item.get("sha256") != actual_hash:
             raise ValueError(f"{original_name} 在预览后发生变化，请重新解析")
-        year, school, person = _validated_metadata(item)
-        prepared.append((original_name, content, actual_hash, year, school, person))
+        person = _validated_metadata(item)
+        prepared.append((original_name, content, actual_hash, person))
     directory = settings.email_resumes_dir / title
     directory.mkdir(parents=True, exist_ok=True, mode=0o700)
     results = []
-    for original_name, content, actual_hash, year, school, person in prepared:
-        base = f"{title}+{year}+{school}+{person}"
+    for original_name, content, actual_hash, person in prepared:
+        base = f"{title}+{person}"
         target = directory / f"{base}{Path(original_name).suffix.lower()}"
         version = 2
         while target.exists() and hashlib.sha256(target.read_bytes()).hexdigest() != actual_hash:
@@ -314,4 +389,4 @@ def save(store, actor: str, job: dict, provider: str, intent_confirmed: bool, fi
     return {"status": "saved", "job_id": job_id, "job_title": title,
             "directory": str(directory), "count": len(results), "results": results,
             "external_actions": 0,
-            "limitation": "邮箱登录和附件下载由收集人完成；TalentPilot 不保存邮箱密码或登录会话。"}
+            "limitation": "邮箱登录和验证由收集人完成；Agent 下载附件，且不保存邮箱密码或登录会话。"}

@@ -35,18 +35,16 @@ def main():
             "adjustments": [], "model": "synthetic-llm", "llm_calls": 1,
             "external_hiring_actions": 0,
         }))
+        page.evaluate("state.advisorStatus={configured:true,missing:[]}")
         page.locator('[data-source="邮箱"]').click()
-        page.locator("#advisor-continue").wait_for(state="visible")
-        page.locator("#advisor-continue").click()
         page.locator("#email-dialog").wait_for(state="visible")
         email_visible = page.locator("#email-dialog-title").inner_text() == "邮箱 Agent 收集简历"
         email_login_visible = page.locator("#email-login").is_visible()
+        email_login_check_visible = page.locator("#email-check-login").is_visible()
         email_agent_resume_visible = page.locator("#email-resume").is_visible()
         page.locator("#email-cancel").click()
         page.evaluate("state.emailRun=null")
         page.locator('[data-source="海外"]').click()
-        page.locator("#advisor-continue").wait_for(state="visible")
-        page.locator("#advisor-continue").click()
         page.locator("#overseas-dialog").wait_for(state="visible")
         page.wait_for_timeout(300)
         overseas_visible = page.locator("#overseas-dialog-title").inner_text() == "海外人才采集与简历下载"
@@ -65,11 +63,13 @@ def main():
               "extension_action_visible": extension_action_visible,
               "email_visible": email_visible,
               "email_login_visible": email_login_visible,
+              "email_login_check_visible": email_login_check_visible,
               "email_agent_resume_visible": email_agent_resume_visible,
               "real_external_write": False, "recording_user_selection_verified": False}
     (output / "ui-verification.json").write_text(json.dumps(result, ensure_ascii=False, indent=2))
     print(json.dumps(result, ensure_ascii=False))
     assert (overseas_visible and extension_action_visible and email_visible and email_login_visible
+            and email_login_check_visible
             and email_agent_resume_visible and not errors and not desktop_overflow and not mobile_overflow)
 
 
