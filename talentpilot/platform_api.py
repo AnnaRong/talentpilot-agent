@@ -99,6 +99,11 @@ class AutonomousSettingsRequest(Strict):
     minute: int = Field(default=0, ge=0, le=59)
 
 
+class SourceCycleCompleteRequest(Strict):
+    jobs: int = Field(ge=1, le=500)
+    completed_jobs: int = Field(ge=0, le=500)
+
+
 class ResumeRequest(Strict):
     dataset_id: str
     candidate_id: str = Field(min_length=1, max_length=100)
@@ -435,12 +440,37 @@ def autonomous_run_now(request: Request):
     return {"run_id": run_now(runtime.store, actor["id"])}
 
 
+@router.post("/autonomous/{operation}")
+def autonomous_control(request: Request, operation: Literal["pause", "resume"]):
+    runtime, actor = components(request)
+    require(actor, {"admin"})
+    from .autonomous import control
+    return control(runtime.store, actor["id"], operation)
+
+
 @router.post("/autonomous/steps/{step}/run")
 def autonomous_run_step(request: Request, step: int):
     runtime, actor = components(request)
     require(actor, {"admin"})
     from .autonomous import rerun_step
     return {"run_id": rerun_step(runtime.store, actor["id"], step - 1)}
+
+
+@router.post("/autonomous/{run_id}/source-cycle-complete")
+def autonomous_source_cycle_complete(request: Request, run_id: str, body: SourceCycleCompleteRequest):
+    runtime, actor = components(request)
+    require(actor, {"admin"})
+    from .autonomous import complete_source_cycle
+    complete_source_cycle(runtime.store, actor["id"], run_id, body.model_dump())
+    return {"run_id": run_id, "status": "completed"}
+
+
+@router.post("/autonomous/source-cycle/restart")
+def autonomous_source_cycle_restart(request: Request):
+    runtime, actor = components(request)
+    require(actor, {"admin"})
+    from .autonomous import restart_source_cycle
+    return {"run_id": restart_source_cycle(runtime.store, actor["id"])}
 
 
 @router.post("/recordings")
@@ -549,7 +579,13 @@ def collect_positions_for_upload():
 
 def collect_position_overview():
     from .italent_browser import add_interview_counts, collect_interviews, collect_positions
-    return add_interview_counts(collect_positions(), collect_interviews())
+    inventory = collect_positions()
+    try:
+        return add_interview_counts(inventory, collect_interviews())
+    except ValueError as error:
+        # The job list is independently complete and remains useful when the slower
+        # interview-page read fails or times out.
+        return {**inventory, "interviews_captured": None, "interview_error": str(error)}
 
 
 @router.post("/candidate-history/{batch_id}/execute")
@@ -606,6 +642,14 @@ def login_boss(request: Request):
     require(actor, {"admin"})
     from .boss_sourcing import start_login
     return start_login()
+
+
+@router.get("/connectors/boss/status")
+def boss_login_status(request: Request):
+    _, actor = components(request)
+    require(actor, {"admin"})
+    from .boss_sourcing import existing_login_status
+    return existing_login_status()
 
 
 @router.post("/connectors/boss/greetings/preview")
@@ -751,6 +795,14 @@ def preview_email_resumes(request: Request, body: EmailPreviewRequest):
     require(actor, {"admin"})
     from .email_recruiting import preview
     return preview([item.model_dump() for item in body.files])
+
+
+@router.get("/connectors/email/probe")
+def probe_email_login(request: Request):
+    _, actor = components(request)
+    require(actor, {"admin"})
+    from .email_recruiting import probe_logged_in_mailbox
+    return probe_logged_in_mailbox("QQ邮箱")
 
 
 @router.post("/connectors/email/collections")

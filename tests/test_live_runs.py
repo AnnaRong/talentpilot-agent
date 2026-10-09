@@ -104,6 +104,11 @@ class LiveTests(unittest.TestCase):
         self.assertEqual(self.state()["status"], "awaiting_export_approval")
         self.mocks[0].assert_called_once()
 
+    def test_application_pager_uses_current_component_control(self):
+        source = (Path(live_runs.italent_browser.__file__).with_name("collect_applications.js")).read_text()
+        self.assertIn("handlePageChange", source)
+        self.assertNotIn("textContent.trim()==='下一页'", source)
+
     def test_cancel_discards_inflight_checkpoint(self):
         run_id = self.submit()
         def cancel_during_read():
@@ -140,6 +145,19 @@ class LiveTests(unittest.TestCase):
         self.assertEqual(self.state()["completed_steps"], [])
         self.finish()
         self.assertEqual(self.mocks[0].call_count, 2)
+
+    def test_slow_application_read_is_not_rejected_only_because_positions_are_old(self):
+        self.submit()
+        live_runs.tick(self.runtime)
+        with self.store.transaction() as cx:
+            row = cx.execute("SELECT checkpoint FROM live_runs").fetchone()
+            cp = self.store.unseal(row["checkpoint"])
+            cp["positions"]["at"] = time.time() - 1900
+            cx.execute("UPDATE live_runs SET checkpoint=?", (self.store.seal(cp),))
+        live_runs.tick(self.runtime)
+        self.assertEqual(self.state()["status"], "queued")
+        self.assertEqual(self.state()["completed_steps"], ["positions", "applications"])
+        self.mocks[1].assert_called_once()
 
     def test_permission_rechecked_before_each_step(self):
         self.submit()

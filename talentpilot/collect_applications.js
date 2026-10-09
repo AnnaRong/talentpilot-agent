@@ -80,7 +80,7 @@ for(let page=0;page<150;page++){
   let clicked=false;
   for(let n=0;n<40;n++){
     await wait(.2);
-    clicked=await js(`(()=>{const d=document.querySelector('iframe').contentDocument;const next=[...d.querySelectorAll('a')].find(a=>a.textContent.trim()==='下一页');if(next)next.click();return !!next})()`);
+    clicked=await js(`(()=>{const d=document.querySelector('iframe').contentDocument,input=d.querySelector('input.phoenix-pagination__pageInput');if(!input)return false;let fiber=input[Object.keys(input).find(k=>k.startsWith('__reactInternalInstance'))];while(fiber&&!fiber.stateNode?.handlePageChange)fiber=fiber.return;if(!fiber)return false;fiber.stateNode.handlePageChange(${page + 2},{type:'click'},'jump');return true})()`);
     if(clicked)break;
   }
   if(!clicked)throw new Error('Next-page control missing');

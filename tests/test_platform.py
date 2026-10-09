@@ -16,6 +16,7 @@ from fastapi.testclient import TestClient
 
 from talentpilot import actions, privacy, workflows
 from talentpilot.italent_browser import _collect, add_interview_counts
+from talentpilot.platform_api import collect_position_overview
 from talentpilot.config import settings
 from talentpilot.model_agent import explain_metrics
 from talentpilot.platform_store import digest
@@ -95,6 +96,17 @@ class PlatformTests(unittest.TestCase):
              patch("talentpilot.italent_browser.subprocess.run", return_value=completed):
             with self.assertRaisesRegex(ValueError, "岗位读取成功，但面试人数读取失败"):
                 _collect("collect_interviews.js", "verified_interview_inventory", 1)
+
+    def test_position_overview_keeps_jobs_when_interview_read_fails(self):
+        positions = {"positions": [{"job_id": "J_TEST", "title": "Test"}],
+                     "declared": 1, "captured": 1, "collected_at": "jobs-at"}
+        with patch("talentpilot.italent_browser.collect_positions", return_value=positions), \
+             patch("talentpilot.italent_browser.collect_interviews",
+                   side_effect=ValueError("面试页读取超时")):
+            result = collect_position_overview()
+        self.assertEqual(result["positions"], positions["positions"])
+        self.assertIsNone(result["interviews_captured"])
+        self.assertEqual(result["interview_error"], "面试页读取超时")
 
     def test_idempotency_concurrent(self):
         with ThreadPoolExecutor(max_workers=4) as pool:

@@ -7,6 +7,7 @@ from zoneinfo import ZoneInfo
 
 from talentpilot import boss_sourcing
 from talentpilot.runtime import Runtime
+from fastapi.testclient import TestClient
 
 
 YAML = """
@@ -80,6 +81,16 @@ class BossSourcingTests(unittest.TestCase):
         self.assertEqual(rows[0]["experience_years"], 5)
         self.assertEqual(rows[0]["salary_max_k"], 35)
         self.assertEqual(rows[0]["status"], "在职-考虑机会")
+
+    @patch("talentpilot.boss_sourcing.existing_login_status",
+           return_value={"logged_in": True, "controlled_pages": 1, "detail": "已登录"})
+    def test_login_status_api_supports_sequential_sourcing(self, status):
+        from talentpilot.server import app
+        with TestClient(app) as client:
+            response = client.get("/api/platform/connectors/boss/status")
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.json()["logged_in"])
+        status.assert_called_once_with()
 
     def test_verified_jd_generates_conservative_scheduled_profile(self):
         jd = {

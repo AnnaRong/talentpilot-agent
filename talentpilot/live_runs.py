@@ -157,8 +157,8 @@ def tick(runtime):
     cp = store.unseal(row["checkpoint"])
     step = STEPS[row["step"]]
     try:
-        if cp and step not in {"report"} and time.time() - min(v["at"] for v in cp.values()) > TTL:
-            raise ValueError("Source checkpoints older than 30 minutes. Resume to restart collection.")
+        if cp and step in {"validate_import", "audit"} and time.time() - min(v["at"] for v in cp.values()) > TTL:
+            raise ValueError("岗位读取已完成，但后续采集超过 30 分钟；请恢复任务以重新采集申请和面试数据。")
         with store.transaction() as cx:
             store.event(cx, run_id, "live.step.started", step, {"depends_on": list(cp)})
         if step in {"positions", "applications", "interviews"}:

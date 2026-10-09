@@ -83,16 +83,16 @@ for(let n=0;n<40;n++){
 }
 if(!ready)throw new Error('Interview list did not load');
 async function clickPage(label) {
-  const point=await js(`(()=>{
-    const f=document.querySelector('iframe'),d=f.contentDocument;
-    const all=[...d.querySelectorAll('a')].filter(a=>a.textContent.trim()===${JSON.stringify(label)});
-    const e=all.find(a=>{const r=a.getBoundingClientRect();return r.width>0&&r.height>0})||all[0];
-    if(!e)return null;
-    const a=e.getBoundingClientRect(),b=f.getBoundingClientRect();
-    return {x:a.x+b.x+a.width/2,y:a.y+b.y+a.height/2};
+  return await js(`(()=>{
+    const d=document.querySelector('iframe').contentDocument,input=d.querySelector('input.phoenix-pagination__pageInput');
+    if(!input)return false;
+    let fiber=input[Object.keys(input).find(k=>k.startsWith('__reactInternalInstance'))];
+    while(fiber&&!fiber.stateNode?.handlePageChange)fiber=fiber.return;
+    if(!fiber)return false;
+    if(${JSON.stringify(label)}==='下一页')fiber.stateNode.handlePrevNextButtonChange(true,{type:'click'});
+    else fiber.stateNode.handlePageChange(Number(${JSON.stringify(label)}),{type:'click'},'jump');
+    return true;
   })()`);
-  if(point)await click(point);
-  return !!point;
 }
 async function currentPage() {
   return await js(`(()=>{

@@ -21,8 +21,21 @@ def main():
         context = browser.new_context(viewport={"width": 1440, "height": 1000})
         page = context.new_page()
         page.on("pageerror", lambda error: errors.append(str(error)))
+        page.route("**/api/platform/autonomous", lambda route: route.fulfill(json={"runs": []}))
         page.goto(base_url + "/console")
         page.locator("#workspace").wait_for(state="visible")
+        page.wait_for_function("document.querySelectorAll('#workspace > section > .agent-step-status').length === 8")
+        agent_start_visible = page.locator("#agent-run").is_visible()
+        agent_pause_visible = page.locator("#agent-pause").is_visible()
+        workflow_sections = page.locator("#workspace > section[data-agent-step]").count()
+        workflow_statuses = page.locator("#workspace > section > .agent-step-status").count()
+        page.evaluate("""renderAgentWorkflow({runs:[{status:'running',step:2,steps:Array.from({length:8},(_,index)=>({status:index<2?'completed':index===2?'running':'pending'}))}]})""")
+        highlighted_step = page.locator("#workspace > section.agent-current").get_attribute("data-agent-step")
+        active_step_text = page.locator("#workspace > section.agent-current > .agent-step-status").inner_text()
+        page.evaluate("""renderAgentStepData({id:'inventory-test',updated_at:'2026-10-09T12:00:00Z',steps:[{status:'completed_with_gaps'}],checkpoint:{positions:[{job_id:'J_TEST',title:'测试岗位',department:'测试部门',recruiter:'测试招聘人',hc:'1'}],details:{0:{positions_read:1}}}})""")
+        checkpoint_inventory_rows = page.locator("#live-inventory tbody tr").count()
+        checkpoint_inventory_status = page.locator("#position-state").inner_text()
+        source_sequence_visible = page.locator("#source-sequence").is_visible()
         page.wait_for_function("document.querySelector('#report-source').textContent !== '正在读取报表'")
         page.evaluate("""
           state.positions=[{job_id:'J_SYNTHETIC',title:'海外业务经理',department:'TEST',first_interview_count:0,second_interview_count:0,third_interview_count:0}];
@@ -30,6 +43,9 @@ def main():
           select.innerHTML='<option value="J_SYNTHETIC">海外业务经理（J_SYNTHETIC）</option>';
           select.dispatchEvent(new Event('change'));
         """)
+        source_sequence_enabled = page.locator("#source-sequence").is_enabled()
+        source_sequence_label = page.locator("#source-sequence").inner_text()
+        source_cycle_hook = page.evaluate("String(syncAgentWorkflow).includes('source_cycle_completed')")
         page.route("**/api/platform/connectors/platform-advisor/interview", lambda route: route.fulfill(json={
             "status": "ready", "complete": True, "summary": ["SYNTHETIC UI ONLY"],
             "adjustments": [], "model": "synthetic-llm", "llm_calls": 1,
@@ -65,12 +81,31 @@ def main():
               "email_login_visible": email_login_visible,
               "email_login_check_visible": email_login_check_visible,
               "email_agent_resume_visible": email_agent_resume_visible,
+              "agent_start_visible": agent_start_visible,
+              "agent_pause_visible": agent_pause_visible,
+              "workflow_sections": workflow_sections,
+              "workflow_statuses": workflow_statuses,
+              "highlighted_step": highlighted_step,
+              "active_step_text": active_step_text,
+              "checkpoint_inventory_rows": checkpoint_inventory_rows,
+              "checkpoint_inventory_status": checkpoint_inventory_status,
+              "source_sequence_visible": source_sequence_visible,
+              "source_sequence_enabled": source_sequence_enabled,
+              "source_sequence_label": source_sequence_label,
+              "source_cycle_hook": source_cycle_hook,
               "real_external_write": False, "recording_user_selection_verified": False}
     (output / "ui-verification.json").write_text(json.dumps(result, ensure_ascii=False, indent=2))
     print(json.dumps(result, ensure_ascii=False))
     assert (overseas_visible and extension_action_visible and email_visible and email_login_visible
             and email_login_check_visible
-            and email_agent_resume_visible and not errors and not desktop_overflow and not mobile_overflow)
+            and email_agent_resume_visible and agent_start_visible and agent_pause_visible
+            and workflow_sections == 8 and workflow_statuses == 8
+            and highlighted_step == "3" and active_step_text == "Agent 正在执行此步骤"
+            and checkpoint_inventory_rows == 1 and "已读取 1 个岗位" in checkpoint_inventory_status
+            and source_sequence_visible and source_sequence_enabled
+            and source_sequence_label == "全部岗位依次寻找简历"
+            and source_cycle_hook
+            and not errors and not desktop_overflow and not mobile_overflow)
 
 
 if __name__ == "__main__":

@@ -68,7 +68,61 @@ def _create(store, actor: str, run_date: str, *, manual: bool) -> str:
 
 
 def run_now(store, actor: str) -> str:
+    with store.transaction() as cx:
+        resumable = cx.execute("""SELECT ar.id,ar.checkpoint FROM autonomous_runs ar
+          WHERE ar.actor=? AND ar.status='completed_with_gaps' ORDER BY ar.updated_at DESC LIMIT 1""",
+                               (actor,)).fetchone()
+        if resumable:
+            checkpoint = store.unseal(resumable["checkpoint"]) or {}
+            live_id = checkpoint.get("live_run_id")
+            live = cx.execute("SELECT status,attempts FROM live_runs WHERE id=?", (live_id,)).fetchone() if live_id else None
+            if live and live["status"] in {"waiting_for_user", "failed"} and live["attempts"] < 12:
+                cx.execute("UPDATE live_runs SET status='queued',error=NULL,claim=NULL,updated_at=? WHERE id=?",
+                           (utcnow(), live_id))
+                checkpoint.setdefault("details", {}).pop("0", None)
+                checkpoint.setdefault("step_statuses", {}).pop("0", None)
+                checkpoint["gaps"] = [item for item in checkpoint.get("gaps", []) if "第1步" not in item]
+                cx.execute("UPDATE autonomous_runs SET status='waiting_for_inventory',step=0,checkpoint=?,error=NULL,updated_at=? WHERE id=?",
+                           (store.seal(checkpoint), utcnow(), resumable["id"]))
+                store.audit(cx, actor, "autonomous.retry_live_collection", resumable["id"])
+                return resumable["id"]
     return _create(store, actor, datetime.now(ZONE).strftime("%Y-%m-%d-manual-%H%M%S"), manual=True)
+
+
+def control(store, actor: str, operation: str) -> dict:
+    with store.transaction() as cx:
+        if operation == "pause":
+            row = cx.execute("""SELECT * FROM autonomous_runs WHERE actor=? AND
+              status IN ('queued','running','waiting_for_inventory') ORDER BY created_at LIMIT 1""",
+                             (actor,)).fetchone()
+            if not row:
+                return {"operation": operation, "status": "idle", "run_id": None}
+            checkpoint = store.unseal(row["checkpoint"]) or {}
+            live_run_id = checkpoint.get("live_run_id")
+            cx.execute("UPDATE autonomous_runs SET status='paused',updated_at=? WHERE id=?",
+                       (utcnow(), row["id"]))
+            if live_run_id:
+                cx.execute("""UPDATE live_runs SET status='paused',claim=NULL,lease_until=NULL,updated_at=?
+                  WHERE id=? AND status IN ('queued','running','waiting_for_audit')""",
+                           (utcnow(), live_run_id))
+            store.audit(cx, actor, "autonomous.pause", row["id"])
+            return {"operation": operation, "status": "paused", "run_id": row["id"]}
+        if operation == "resume":
+            row = cx.execute("SELECT * FROM autonomous_runs WHERE actor=? AND status='paused' ORDER BY updated_at DESC LIMIT 1",
+                             (actor,)).fetchone()
+            if not row:
+                return {"operation": operation, "status": "idle", "run_id": None}
+            checkpoint = store.unseal(row["checkpoint"]) or {}
+            live_run_id = checkpoint.get("live_run_id")
+            step = 1 if row["step"] > 1 and checkpoint.get("positions") and not checkpoint.get("source_cycle_completed") else row["step"]
+            if live_run_id:
+                cx.execute("UPDATE live_runs SET status='queued',updated_at=? WHERE id=? AND status='paused'",
+                           (utcnow(), live_run_id))
+            cx.execute("UPDATE autonomous_runs SET status='queued',step=?,updated_at=? WHERE id=?",
+                       (step, utcnow(), row["id"]))
+            store.audit(cx, actor, "autonomous.resume", row["id"])
+            return {"operation": operation, "status": "queued", "run_id": row["id"]}
+    raise ValueError("不支持的后台流程操作")
 
 
 def rerun_step(store, actor: str, step: int) -> str:
@@ -104,6 +158,42 @@ def rerun_step(store, actor: str, step: int) -> str:
     return run_id
 
 
+def complete_source_cycle(store, actor: str, run_id: str, result: dict) -> None:
+    with store.transaction() as cx:
+        row = cx.execute("SELECT checkpoint FROM autonomous_runs WHERE id=? AND actor=?",
+                         (run_id, actor)).fetchone()
+        if not row:
+            raise ValueError("后台流程不存在")
+        checkpoint = store.unseal(row["checkpoint"]) or {}
+        checkpoint["source_cycle_completed"] = True
+        checkpoint["source_cycle"] = result
+        cx.execute("UPDATE autonomous_runs SET checkpoint=?,updated_at=? WHERE id=?",
+                   (store.seal(checkpoint), utcnow(), run_id))
+        store.audit(cx, actor, "autonomous.source_cycle_completed", run_id)
+
+
+def restart_source_cycle(store, actor: str) -> str:
+    with store.transaction() as cx:
+        rows = cx.execute("""SELECT * FROM autonomous_runs WHERE actor=? AND status<>'superseded'
+          ORDER BY updated_at DESC LIMIT 20""", (actor,)).fetchall()
+        row = next((candidate for candidate in rows
+                    if (store.unseal(candidate["checkpoint"]) or {}).get("positions")), None)
+        if not row:
+            raise ValueError("尚未读取岗位")
+        checkpoint = store.unseal(row["checkpoint"]) or {}
+        if not checkpoint.get("positions"):
+            raise ValueError("当前任务没有已读取岗位")
+        checkpoint.pop("source_cycle_completed", None)
+        checkpoint.pop("source_cycle", None)
+        checkpoint.setdefault("step_statuses", {}).pop("1", None)
+        checkpoint.setdefault("details", {}).pop("1", None)
+        checkpoint["gaps"] = [item for item in checkpoint.get("gaps", []) if "第2步" not in item]
+        cx.execute("UPDATE autonomous_runs SET status='queued',step=1,checkpoint=?,error=NULL,updated_at=? WHERE id=?",
+                   (store.seal(checkpoint), utcnow(), row["id"]))
+        store.audit(cx, actor, "autonomous.source_cycle_restarted", row["id"])
+        return row["id"]
+
+
 def dispatch_due(store, now: datetime | None = None) -> int:
     current = (now or datetime.now(ZONE)).astimezone(ZONE)
     today = current.date().isoformat()
@@ -124,6 +214,9 @@ def dispatch_due(store, now: datetime | None = None) -> int:
 
 def _public(store, row) -> dict:
     checkpoint = store.unseal(row["checkpoint"]) or {}
+    detail = checkpoint.get("details", {}).get("0", {})
+    if detail.get("positions_available") and detail.get("error") == "Source checkpoints older than 30 minutes. Resume to restart collection.":
+        detail["error"] = "申请或面试清单读取耗时过长；岗位清单已保留。"
     statuses = checkpoint.get("step_statuses", {})
     return {
         "id": row["id"], "run_date": row["run_date"], "status": row["status"],
@@ -174,7 +267,8 @@ def _finish(store, row, checkpoint: dict, status: str, detail: dict | None = Non
     if next_step >= len(STEPS):
         final_status = "completed_with_gaps" if checkpoint.get("gaps") else "completed"
     with store.transaction() as cx:
-        cx.execute("UPDATE autonomous_runs SET status=?,step=?,checkpoint=?,error=NULL,updated_at=? WHERE id=?",
+        cx.execute("""UPDATE autonomous_runs SET status=?,step=?,checkpoint=?,error=NULL,updated_at=?
+          WHERE id=? AND status<>'paused'""",
                    (final_status, next_step, store.seal(checkpoint), utcnow(), row["id"]))
         store.event(cx, row["id"], "autonomous.step_completed", "daily-agent",
                     {"step": STEPS[row["step"]], "step_status": status})
@@ -203,9 +297,17 @@ def _run_step(runtime, row: dict, checkpoint: dict) -> bool:
         live_cp = store.unseal(live["checkpoint"]) or {}
         positions = live_cp.get("positions", {}).get("value", {}).get("positions", [])
         if live["status"] in {"waiting_for_user", "failed", "cancelled"}:
-            _gap(checkpoint, "第1步北森完整采集未完成，请检查登录、浏览器控制权或面试页")
-            _finish(store, row, checkpoint, "needs_attention",
-                    {"status": live["status"], "error": live["error"], "positions_read": len(positions)})
+            if positions:
+                checkpoint["positions"] = positions
+                _gap(checkpoint, "第1步岗位已读取，但申请或面试清单未完成；招聘漏斗和台账等待完整数据")
+                _finish(store, row, checkpoint, "completed_with_gaps",
+                        {"status": live["status"], "error": live["error"],
+                         "positions_read": len(positions), "positions_available": True})
+            else:
+                _gap(checkpoint, "第1步北森完整采集未完成，请检查登录、浏览器控制权或面试页")
+                _finish(store, row, checkpoint, "needs_attention",
+                        {"status": live["status"], "error": live["error"],
+                         "positions_read": 0, "positions_available": False})
             return True
         detail = live_cp.get("validate_import", {}).get("value", {})
         checkpoint["dataset_id"], checkpoint["positions"] = detail.get("dataset_id"), positions
@@ -217,6 +319,8 @@ def _run_step(runtime, row: dict, checkpoint: dict) -> bool:
 
     positions = checkpoint.get("positions", [])
     if step == 1:
+        if not checkpoint.get("source_cycle_completed"):
+            return False
         today = datetime.now(ZONE).date().isoformat()
         from .boss_sourcing import configure_from_jd, dispatch_due as dispatch_boss, existing_login_status
         from .italent_browser import collect_job_jd

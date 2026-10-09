@@ -4,6 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
+from fastapi.testclient import TestClient
 
 from talentpilot import email_recruiting
 from talentpilot.runtime import Runtime
@@ -174,6 +175,16 @@ class EmailRecruitingTests(unittest.TestCase):
         result = email_recruiting.probe_logged_in_mailbox()
         self.assertTrue(result["logged_in"])
         self.assertIn("已核验", result["detail"])
+
+    @patch("talentpilot.email_recruiting.probe_logged_in_mailbox",
+           return_value={"logged_in": True, "detail": "已核验 QQ 邮箱收件箱登录态"})
+    def test_email_probe_api_supports_sequential_sourcing(self, probe):
+        from talentpilot.server import app
+        with TestClient(app) as client:
+            response = client.get("/api/platform/connectors/email/probe")
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.json()["logged_in"])
+        probe.assert_called_once_with("QQ邮箱")
 
     def test_external_login_confirmation_keeps_no_session_secret(self):
         result = email_recruiting.confirm_external_login(
